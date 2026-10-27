@@ -1,0 +1,51 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - name: Tests with the race detector (concurrent breakers, limiters, cache, single-flight)
+        run: go test -race -count=1 ./...
+      - name: Known vulnerabilities in the Go standard library
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Gateway overhead
+        run: go test ./internal/gateway/ -run '^$' -bench GatewayOverhead -benchmem | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t llm-gateway:ci .
+      - name: Scan image (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: llm-gateway:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: "Smoke test: primary down, request fails over to backup; bad key rejected"
+        run: |
+          python3 scripts/fake_upstream.py 18101 down & python3 scripts/fake_upstream.py 18102 backup &
+          KEYS=$(docker run --rm llm-gateway:ci new-key)
+          KEY=$(echo "$KEYS" | awk '/^key:/ {print $2}'); HASH=$(echo "$KEYS" | awk '/^sha256:/ {print $2}')
+          mkdir -p cfg && cat > cfg/gateway.json <<EOF
+          {"listen": ":8080", "metrics_listen": ":9090",
+           "providers": [{"name": "primary", "kind": "openai", "base_url": "http://127.0.0.1:18101/v1"},
+                         {"name": "backup", "kind": "openai", "base_url": "http://127.0.0.1:18102/v1"}],
+           "routes": {"smart": {"targets": [{"provider": "primary", "model": "a"}, {"provider": "backup", "model": "b"}]}},
+           "keys": [{"id": "ci", "sha256": "$HASH", "routes": ["*"]}]}
+          EOF
+          docker run -d --name gw --network host --read-only -v "$PWD/cfg:/config:ro" llm-gateway:ci
+          for i in $(seq 1 20); do curl -sf localhost:8080/healthz && break; sleep 0.5; done
+          curl -sf localhost:8080/v1/chat/completions -H "Authorization: Bearer $KEY" \
+            -d '{"model":"smart","messages":[{"role":"user","content":"hi"}]}' | grep -q "answer from backup"
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/v1/chat/completions -H 'Authorization: Bearer nope' -d '{}')" = "401"
+          curl -sf localhost:9090/metrics | grep -q 'gateway_upstream_attempts_total{provider="primary",outcome="error"} 1'

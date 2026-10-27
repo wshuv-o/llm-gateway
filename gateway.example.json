@@ -1,0 +1,28 @@
+{
+  "listen": ":8080",
+  "metrics_listen": ":9090",
+  "providers": [
+    {"name": "anthropic", "kind": "anthropic", "base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "timeout_seconds": 60},
+    {"name": "openai", "kind": "openai", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY", "timeout_seconds": 60},
+    {"name": "local", "kind": "openai", "base_url": "http://localhost:11434/v1", "timeout_seconds": 120}
+  ],
+  "routes": {
+    "smart": {"targets": [
+      {"provider": "anthropic", "model": "claude-sonnet-5-5"},
+      {"provider": "openai", "model": "gpt-5"}
+    ]},
+    "fast": {"strategy": "round_robin", "targets": [
+      {"provider": "anthropic", "model": "claude-haiku-5-5"},
+      {"provider": "openai", "model": "gpt-5-mini"}
+    ]},
+    "private": {"targets": [
+      {"provider": "local", "model": "llama3.2"}
+    ]}
+  },
+  "keys": [
+    {"id": "support-bot", "sha256": "replace-with-output-of-llm-gateway-new-key-000000000000000000000", "routes": ["fast"], "rpm": 120, "tpm": 200000, "max_tokens": 1024},
+    {"id": "internal-tools", "sha256": "replace-with-output-of-llm-gateway-new-key-111111111111111111111", "routes": ["*"], "rpm": 600, "tpm": 1000000}
+  ],
+  "cache": {"max_entries": 10000, "ttl_seconds": 600},
+  "breaker": {"failures": 3, "cooldown_seconds": 30}
+}
