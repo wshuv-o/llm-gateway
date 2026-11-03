@@ -1,5 +1,5 @@
 # static binary, no shell, runs as non-root
-FROM golang:1.25 AS build
+FROM golang:1.27 AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .
